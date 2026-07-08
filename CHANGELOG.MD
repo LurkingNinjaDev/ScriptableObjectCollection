@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.1] - 07/08/2026
+### Added
+- New non-generic `CollectionItemQueryRule` static class — the single source of truth for evaluating one `MatchType` rule (`Passes(matchType, matchCount, pickerCount)`). Both runtime match paths, the property drawer's validation, and the new test suite share it, so their semantics can no longer drift apart.
+- `CollectionItemQuery<T>.Matches(CollectionItemPicker<T> targetPicker)` overload (plus an `out int` variant). When the query's pickers and the target picker are bitmask-compatible on the same collection, matching is pure bit arithmetic on cached masks — zero allocation and no enumeration. Existing call sites that pass a picker (e.g. a tag list) bind to it automatically; anything else falls back to the `IEnumerable<T>` path.
+- `CollectionItemMask64.From<T>(items, expectedCollection, out bool fits)` overload that flags (and excludes) items belonging to a different collection, since bit positions are only meaningful per-collection.
+- `CollectionItemPicker<T>.MaskCollection` (the single collection all picked items share; `null` when empty or mixed) and `MaskItemCount` (distinct items represented in `CachedMask` — unlike `Count`, unaffected by duplicate or unresolvable serialized entries).
+- New editor-side `CollectionItemQuerySatisfiability` helper: exact satisfiability analysis of a query's rule set by enumerating presence assignments over the (few) referenced items, with a smallest-conflicting-subset finder for error attribution and a pairwise fallback above 16 distinct items. Covered by a brute-force EditMode test suite (`Tests/Editor`) that verifies agreement with the runtime semantics over every rule pair (4-item universe) and every rule triple (3-item universe).
+
+### Changed
+- **`CollectionItemQuery<T>.Matches` now skips rules whose picker has no (resolvable) items instead of evaluating them.** Previously an empty `Any`/`NotAll` rule — e.g. a freshly added, not-yet-configured row — made the whole query permanently return `false`. Empty rules are now inert, which also makes `IsEmpty() == true` imply `Matches(...) == true`, consistent with callers that use `IsEmpty()` as a "no filter configured" guard.
+- `CollectionItemPicker<T>.CanUseBitmask` now additionally requires every picked item to belong to the same collection (masks built from mixed collections would let unrelated items collide on the same bit).
+- `CollectionItemQueryPropertyDrawer` improvements: the `MatchType` dropdown shows semantic hints ("Any (has at least one)", "Not All (missing at least one)", …); the query summary uses singular phrasing for one-item rules ("forbids objects that contain Frozen"); validation results are memoized per serialized content instead of recomputed twice per repaint; help box heights use the same width basis in `GetPropertyHeight` and `OnGUI`.
+
+### Fixed
+- The property drawer's impossible-query detection is now exact instead of pairwise, closing three verified gaps: `Any{t}` + `NotAll{t}` on the same single item was never flagged; rules with empty pickers (which silently made the query unmatchable) were never flagged (now surfaced as an info note since they are skipped); and multi-rule conflicts invisible to any pairwise check (e.g. `Any{a}` + `Any{b}` + `NotAll{a,b}`) were never flagged. Error messages now name the smallest conflicting rule subset ("Rules 1 and 3 can never all be satisfied").
+- The drawer's "Add Rule" button no longer clones the previous rule's picker items into the new rule (`SerializedProperty` array growth duplicates the last element's data; only the `MatchType` was being reset).
+- `MatchesViaGuids` now counts only resolvable picker items when evaluating a rule, matching the bitmask path (which prunes stale references). Previously a dead item reference silently made `All` rules unsatisfiable and `NotAll` rules always pass on the GUID path only.
+- `MatchesViaBitmask` no longer mixes target items from foreign collections into the comparison mask: targets are masked against the query's shared collection and any mismatch falls back to the GUID path (the previous behavior could report false matches when two collections of the same item type were in use).
+- `CollectionItemQuery<T>.QuerySet.ToString()` no longer allocates via LINQ and no longer throws on unresolvable picker entries (delegates to `CollectionItemPicker<T>.ToString()`).
+
 ## [2.6.0] - 05/16/2026
 ### Added
 - New `PreviewMode` enum (`Default`/`Inline`/`PropertyEditorWindow`) on `SOCItemEditorOptionsAttribute`, plus a matching project-wide default in `SOCSettings` (Project Settings > Scriptable Object Collection > Item Inspector). When set to `PropertyEditorWindow`, the per-field Edit button opens Unity's floating Property Editor via `EditorUtility.OpenPropertyEditor` instead of the inline preview panel — fixes rendering issues with third-party inspectors (e.g. Odin) that don't draw correctly in the inline IMGUI drawer. `Default` on the attribute defers to the project setting; project setting defaults to `Inline` so existing behavior is unchanged.
