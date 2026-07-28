@@ -6,7 +6,10 @@ namespace BrunoMikoski.ScriptableObjectCollections
 {
     internal sealed class SOCItemGuidProcessor : AssetPostprocessor
     {
-        private static readonly Dictionary<LongGuid, string> PathByGuid = new Dictionary<LongGuid, string>();
+        // LongGuid -> Unity asset GUID (.meta GUID) of the asset that owns it.
+        // Asset GUIDs survive renames and moves while duplicated assets always receive
+        // a new one, so they are a rename-safe identity for duplicate detection.
+        private static readonly Dictionary<LongGuid, string> AssetGuidByItemGuid = new Dictionary<LongGuid, string>();
         private static bool indexInitialized;
 
         [InitializeOnLoadMethod]
@@ -23,11 +26,11 @@ namespace BrunoMikoski.ScriptableObjectCollections
 
         private static void RebuildIndex()
         {
-            PathByGuid.Clear();
-            string[] guids = AssetDatabase.FindAssets($"t:{nameof(ScriptableObjectCollectionItem)}");
-            for (int i = 0; i < guids.Length; i++)
+            AssetGuidByItemGuid.Clear();
+            string[] assetGuids = AssetDatabase.FindAssets($"t:{nameof(ScriptableObjectCollectionItem)}");
+            for (int i = 0; i < assetGuids.Length; i++)
             {
-                string path = AssetDatabase.GUIDToAssetPath(guids[i]);
+                string path = AssetDatabase.GUIDToAssetPath(assetGuids[i]);
                 ScriptableObjectCollectionItem item = AssetDatabase.LoadAssetAtPath<ScriptableObjectCollectionItem>(path);
                 if (item == null)
                     continue;
@@ -36,60 +39,55 @@ namespace BrunoMikoski.ScriptableObjectCollections
                 if (!guid.IsValid())
                     continue;
 
-                PathByGuid.TryAdd(guid, path);
+                AssetGuidByItemGuid.TryAdd(guid, assetGuids[i]);
             }
 
             indexInitialized = true;
         }
 
-        private static bool TryGetOwner(LongGuid guid, out string path)
+        private static bool TryGetOwnerAssetGuid(LongGuid itemGuid, out string ownerAssetGuid)
         {
             if (!indexInitialized)
                 RebuildIndex();
-            return PathByGuid.TryGetValue(guid, out path);
+            return AssetGuidByItemGuid.TryGetValue(itemGuid, out ownerAssetGuid);
         }
 
-        private static void UpsertIndex(ScriptableObjectCollectionItem item, string path)
+        private static void UpsertIndex(ScriptableObjectCollectionItem item, string assetGuid)
         {
+            if (string.IsNullOrEmpty(assetGuid))
+                return;
             if (!indexInitialized)
                 RebuildIndex();
             LongGuid guid = item.GUID;
             if (!guid.IsValid())
                 return;
-            PathByGuid[guid] = path;
+            AssetGuidByItemGuid[guid] = assetGuid;
         }
 
-        private static void RemoveFromIndex(ScriptableObjectCollectionItem item)
-        {
-            if (!indexInitialized)
-                return;
-            LongGuid guid = item.GUID;
-            if (!guid.IsValid())
-                return;
-
-            if (PathByGuid.TryGetValue(guid, out string existing) && existing == AssetDatabase.GetAssetPath(item))
-                PathByGuid.Remove(guid);
-        }
-
-        private static void RemoveFromIndexByPath(string path)
+        private static void RemoveFromIndexByDeletedPath(string deletedPath)
         {
             if (!indexInitialized)
                 return;
 
-            LongGuid keyToRemove = default;
-            bool found = false;
-            foreach (var kvp in PathByGuid)
+            string deletedAssetGuid = AssetDatabase.AssetPathToGUID(deletedPath);
+            if (string.IsNullOrEmpty(deletedAssetGuid))
+                return;
+
+            List<LongGuid> keysToRemove = null;
+            foreach (KeyValuePair<LongGuid, string> kvp in AssetGuidByItemGuid)
             {
-                if (string.Equals(kvp.Value, path, System.StringComparison.Ordinal))
+                if (string.Equals(kvp.Value, deletedAssetGuid, StringComparison.Ordinal))
                 {
-                    keyToRemove = kvp.Key;
-                    found = true;
-                    break;
+                    keysToRemove ??= new List<LongGuid>();
+                    keysToRemove.Add(kvp.Key);
                 }
             }
 
-            if (found)
-                PathByGuid.Remove(keyToRemove);
+            if (keysToRemove == null)
+                return;
+
+            for (int i = 0; i < keysToRemove.Count; i++)
+                AssetGuidByItemGuid.Remove(keysToRemove[i]);
         }
 
         private static void OnPostprocessAllAssets(
@@ -102,7 +100,7 @@ namespace BrunoMikoski.ScriptableObjectCollections
 
             foreach (string del in deletedAssets)
             {
-                RemoveFromIndexByPath(del);
+                RemoveFromIndexByDeletedPath(del);
             }
 
             foreach (string path in importedAssets)
@@ -111,14 +109,18 @@ namespace BrunoMikoski.ScriptableObjectCollections
                 if (item == null)
                     continue;
 
-                bool changed = EnsureValidAndUniqueGuid(item, path);
+                string assetGuid = AssetDatabase.AssetPathToGUID(path);
+                if (string.IsNullOrEmpty(assetGuid))
+                    continue;
+
+                bool changed = EnsureValidAndUniqueGuid(item, assetGuid);
                 if (changed)
                 {
                     EditorUtility.SetDirty(item);
                     anyDirty = true;
                 }
 
-                UpsertIndex(item, path);
+                UpsertIndex(item, assetGuid);
             }
 
             for (int i = 0; i < movedAssets.Length; i++)
@@ -128,7 +130,8 @@ namespace BrunoMikoski.ScriptableObjectCollections
                 if (item == null)
                     continue;
 
-                UpsertIndex(item, newPath);
+                // Moves and renames keep the same asset GUID; this only heals missing index entries.
+                UpsertIndex(item, AssetDatabase.AssetPathToGUID(newPath));
             }
 
             if (anyDirty)
@@ -137,23 +140,42 @@ namespace BrunoMikoski.ScriptableObjectCollections
             }
         }
 
-        private static bool EnsureValidAndUniqueGuid(ScriptableObjectCollectionItem item, string path)
+        private static bool EnsureValidAndUniqueGuid(ScriptableObjectCollectionItem item, string assetGuid)
         {
-            LongGuid guid = item.GUID;
+            LongGuid itemGuid = item.GUID;
 
-            if (!guid.IsValid())
+            if (!itemGuid.IsValid())
             {
                 item.GenerateNewGUID();
                 return true;
             }
 
-            if (TryGetOwner(guid, out string ownerPath) && !string.Equals(ownerPath, path, StringComparison.Ordinal))
-            {
-                item.GenerateNewGUID();
-                return true;
-            }
+            if (!TryGetOwnerAssetGuid(itemGuid, out string ownerAssetGuid))
+                return false;
 
-            return false;
+            if (string.Equals(ownerAssetGuid, assetGuid, StringComparison.Ordinal))
+                return false;
+
+            // A stale index entry must never cost an item its guid; only an existing
+            // asset that still holds this guid counts as a real duplicate.
+            if (!IsCurrentOwner(ownerAssetGuid, itemGuid))
+                return false;
+
+            item.GenerateNewGUID();
+            return true;
+        }
+
+        private static bool IsCurrentOwner(string ownerAssetGuid, LongGuid itemGuid)
+        {
+            string ownerPath = AssetDatabase.GUIDToAssetPath(ownerAssetGuid);
+            if (string.IsNullOrEmpty(ownerPath))
+                return false;
+
+            ScriptableObjectCollectionItem owner = AssetDatabase.LoadAssetAtPath<ScriptableObjectCollectionItem>(ownerPath);
+            if (owner == null)
+                return false;
+
+            return owner.GUID == itemGuid;
         }
     }
 }

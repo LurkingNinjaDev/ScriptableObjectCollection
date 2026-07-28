@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using System.Text;
 using UnityEngine;
 
@@ -12,13 +11,13 @@ namespace BrunoMikoski.ScriptableObjectCollections.Picker
         public enum MatchType
         {
             /// <summary>Target has at least one of the picker items.</summary>
-            Any = 0,
+            Any = CollectionItemQueryRule.Any,
             /// <summary>Target has every one of the picker items.</summary>
-            All = 1,
+            All = CollectionItemQueryRule.All,
             /// <summary>Target has none of the picker items (all picker items are absent).</summary>
-            NotAny = 2,
+            NotAny = CollectionItemQueryRule.NotAny,
             /// <summary>Target is missing at least one of the picker items (not all are present).</summary>
-            NotAll = 3,
+            NotAll = CollectionItemQueryRule.NotAll,
         }
 
         [Serializable]
@@ -34,7 +33,7 @@ namespace BrunoMikoski.ScriptableObjectCollections.Picker
 
             public override string ToString()
             {
-                return string.Join(", ", picker.Select(o => o.name));
+                return picker != null ? picker.ToString() : "[]";
             }
         }
 
@@ -51,6 +50,37 @@ namespace BrunoMikoski.ScriptableObjectCollections.Picker
         public bool Matches(IEnumerable<T> targetItems)
         {
             return Matches(targetItems, out _);
+        }
+
+        /// <summary>
+        /// Fast path for picker targets (e.g. a tag list): when both this query's pickers and
+        /// <paramref name="targetPicker"/> are bitmask-compatible on the same collection, matching
+        /// is pure bit arithmetic on cached masks — no enumeration, no allocation. Falls back to
+        /// <see cref="Matches(IEnumerable{T})"/> otherwise.
+        /// </summary>
+        public bool Matches(CollectionItemPicker<T> targetPicker)
+        {
+            return Matches(targetPicker, out _);
+        }
+
+        /// <inheritdoc cref="Matches(CollectionItemPicker{T})"/>
+        public bool Matches(CollectionItemPicker<T> targetPicker, out int resultMatchCount)
+        {
+            resultMatchCount = 0;
+            if (query.Length == 0)
+                return true;
+
+            if (targetPicker != null
+                && targetPicker.CanUseBitmask
+                && TryGetSharedBitmaskCollection(out ScriptableObjectCollection sharedCollection)
+                && (sharedCollection == null
+                    || targetPicker.MaskCollection == null
+                    || targetPicker.MaskCollection == sharedCollection))
+            {
+                return MatchesViaBitmask(targetPicker.CachedMask, out resultMatchCount);
+            }
+
+            return Matches((IEnumerable<T>)targetPicker, out resultMatchCount);
         }
 
         public override string ToString()
@@ -70,63 +100,69 @@ namespace BrunoMikoski.ScriptableObjectCollections.Picker
         /// <summary>
         /// Evaluates every <see cref="QuerySet"/> in the query against <paramref name="targetItems"/>.
         /// Returns <c>true</c> only if every set passes its <see cref="MatchType"/> check;
-        /// an empty query returns <c>true</c>.
+        /// an empty query returns <c>true</c>, and sets whose picker has no (resolvable) items are
+        /// skipped as inert — a half-configured rule expresses no constraint.
         /// </summary>
-        /// <param name="targetItems">The items to test against (e.g., the tags on a rigidbody). A null collection is treated as empty, so positive sets (<see cref="MatchType.Any"/>/<see cref="MatchType.All"/>) fail and negative sets (<see cref="MatchType.NotAny"/>/<see cref="MatchType.NotAll"/>) pass.</param>
-        /// <param name="resultMatchCount">Total number of individual picker items found across all query sets. Informational only; does not affect the return value.</param>
+        /// <param name="targetItems">The items to test against (e.g., the tags on a rigidbody). A null collection is treated as empty, so positive sets (<see cref="MatchType.Any"/>/<see cref="MatchType.All"/>) fail and negative sets (<see cref="MatchType.NotAny"/>/<see cref="MatchType.NotAll"/>) pass. May be enumerated twice when the bitmask fast path detects a foreign-collection item and falls back to GUID matching.</param>
+        /// <param name="resultMatchCount">Total number of individual picker items found across all query sets. Informational only (and partial when the method early-returns false); does not affect the return value.</param>
         public bool Matches(IEnumerable<T> targetItems, out int resultMatchCount)
         {
             resultMatchCount = 0;
             if (query.Length == 0)
                 return true;
 
-            bool allPickersAllowBitmask = true;
-            for (int i = 0; i < query.Length; i++)
+            if (TryGetSharedBitmaskCollection(out ScriptableObjectCollection sharedCollection))
             {
-                if (!query[i].Picker.CanUseBitmask)
-                {
-                    allPickersAllowBitmask = false;
-                    break;
-                }
+                ulong targetMask = CollectionItemMask64.From(targetItems, sharedCollection, out bool targetFits);
+                if (targetFits)
+                    return MatchesViaBitmask(targetMask, out resultMatchCount);
             }
-
-            if (allPickersAllowBitmask)
-                return MatchesViaBitmask(targetItems, out resultMatchCount);
 
             return MatchesViaGuids(targetItems, out resultMatchCount);
         }
 
-        private bool MatchesViaBitmask(IEnumerable<T> targetItems, out int resultMatchCount)
+        // True when every picker can use the bitmask fast path AND all non-empty pickers agree on
+        // one collection (bit positions are per-collection; comparing masks across collections
+        // would let unrelated items collide). sharedCollection is null when every picker is empty.
+        private bool TryGetSharedBitmaskCollection(out ScriptableObjectCollection sharedCollection)
+        {
+            sharedCollection = null;
+            for (int i = 0; i < query.Length; i++)
+            {
+                CollectionItemPicker<T> picker = query[i].Picker;
+                if (!picker.CanUseBitmask)
+                    return false;
+
+                ScriptableObjectCollection pickerCollection = picker.MaskCollection;
+                if (pickerCollection == null)
+                    continue;
+
+                if (sharedCollection == null)
+                    sharedCollection = pickerCollection;
+                else if (pickerCollection != sharedCollection)
+                    return false;
+            }
+
+            return true;
+        }
+
+        private bool MatchesViaBitmask(ulong targetMask, out int resultMatchCount)
         {
             resultMatchCount = 0;
-            ulong targetMask = CollectionItemMask64.From(targetItems, out _);
 
             for (int i = 0; i < query.Length; i++)
             {
                 QuerySet qs = query[i];
+
+                int pickerCount = qs.Picker.MaskItemCount;
+                if (pickerCount == 0)
+                    continue;
+
                 int matchCount = qs.Picker.CountMatchesIn(targetMask);
                 resultMatchCount += matchCount;
 
-                int pickerCount = qs.Picker.Count;
-                switch (qs.MatchType)
-                {
-                    case MatchType.NotAny:
-                        if (matchCount > 0)
-                            return false;
-                        break;
-                    case MatchType.NotAll:
-                        if (matchCount == pickerCount)
-                            return false;
-                        break;
-                    case MatchType.Any:
-                        if (matchCount == 0)
-                            return false;
-                        break;
-                    case MatchType.All:
-                        if (matchCount < pickerCount)
-                            return false;
-                        break;
-                }
+                if (!CollectionItemQueryRule.Passes((int)qs.MatchType, matchCount, pickerCount))
+                    return false;
             }
 
             return true;
@@ -149,48 +185,27 @@ namespace BrunoMikoski.ScriptableObjectCollections.Picker
             {
                 QuerySet qs = query[i];
 
-                int pickerCount = qs.Picker.Count;
+                int slotCount = qs.Picker.Count;
+                int validCount = 0;
                 int matchCount = 0;
-                for (int j = 0; j < pickerCount; j++)
+                for (int j = 0; j < slotCount; j++)
                 {
                     T socItem = qs.Picker[j];
                     if (!socItem)
                         continue;
 
+                    validCount++;
                     if (targetGuids.Contains(socItem.GUID))
                         matchCount++;
                 }
 
                 resultMatchCount += matchCount;
 
-                switch (qs.MatchType)
-                {
-                    case MatchType.NotAny:
-                    {
-                        if (matchCount > 0)
-                            return false;
-                        break;
-                    }
-                    case MatchType.NotAll:
-                    {
-                        if (matchCount == pickerCount)
-                            return false;
-                        break;
-                    }
-                    case MatchType.Any:
-                    {
-                        if (matchCount == 0)
-                            return false;
-                        break;
-                    }
-                    case MatchType.All:
-                    {
-                        if (matchCount < pickerCount)
-                            return false;
-                        break;
+                if (validCount == 0)
+                    continue;
 
-                    }
-                }
+                if (!CollectionItemQueryRule.Passes((int)qs.MatchType, matchCount, validCount))
+                    return false;
             }
 
             return true;

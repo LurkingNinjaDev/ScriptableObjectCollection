@@ -56,6 +56,15 @@ namespace BrunoMikoski.ScriptableObjectCollections
         public static ulong From<T>(IEnumerable<T> items, out bool fits)
             where T : ScriptableObject, ISOCItem
         {
+            return From(items, null, out fits);
+        }
+
+        // Builds a mask from items' Index values. When expectedCollection is non-null, any item
+        // belonging to a different collection sets fits=false and is excluded — bit positions are
+        // per-collection, so mixing collections in one mask would let unrelated items collide.
+        public static ulong From<T>(IEnumerable<T> items, ScriptableObjectCollection expectedCollection, out bool fits)
+            where T : ScriptableObject, ISOCItem
+        {
             fits = true;
             ulong mask = 0UL;
             if (items == null)
@@ -69,6 +78,12 @@ namespace BrunoMikoski.ScriptableObjectCollections
                 ScriptableObjectCollectionItem socItem = item as ScriptableObjectCollectionItem;
                 if (socItem == null)
                     continue;
+
+                if (expectedCollection != null && socItem.Collection != expectedCollection)
+                {
+                    fits = false;
+                    continue;
+                }
 
                 int index = socItem.Index;
                 if (!IsValidIndex(index))

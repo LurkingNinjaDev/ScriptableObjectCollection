@@ -70,12 +70,24 @@ namespace BrunoMikoski.ScriptableObjectCollections.Picker
         [NonSerialized] private ulong cachedMask;
         [NonSerialized] private bool isMaskDirty = true;
         [NonSerialized] private bool canUseBitmask;
+        [NonSerialized] private ScriptableObjectCollection maskCollection;
 
-        // True when (a) every item's Index fits in 64 bits AND (b) every item's collection
-        // has SupportsBitmaskIndexing == true. Callers should gate any bitmask fast-path on
-        // this flag and fall back to GUID-based comparison otherwise.
+        // True when (a) every item's Index fits in 64 bits, (b) every item belongs to the same
+        // collection (bit positions are per-collection, so mixing collections would let unrelated
+        // items collide), and (c) that collection has SupportsBitmaskIndexing == true. Callers
+        // should gate any bitmask fast-path on this flag and fall back to GUID-based comparison
+        // otherwise. Empty pickers report true with a null MaskCollection.
         public bool CanUseBitmask { get { EnsureMaskCache(); return canUseBitmask; } }
         public ulong CachedMask   { get { EnsureMaskCache(); return cachedMask;   } }
+
+        // The single collection every picked item belongs to; null when the picker is empty or
+        // when items span multiple collections (in which case CanUseBitmask is false).
+        public ScriptableObjectCollection MaskCollection { get { EnsureMaskCache(); return maskCollection; } }
+
+        // Number of distinct items represented in CachedMask. Prefer this over Count inside
+        // bitmask fast-paths: Count includes duplicate/unresolvable serialized entries, which
+        // never contribute bits.
+        public int MaskItemCount { get { EnsureMaskCache(); return PopCount(cachedMask); } }
 
         private void EnsureMaskCache()
         {
@@ -83,17 +95,30 @@ namespace BrunoMikoski.ScriptableObjectCollections.Picker
                 return;
 
             cachedMask = CollectionItemMask64.From(Items, out bool fits);
-            canUseBitmask = fits && AllItemCollectionsAllowBitmask();
+            bool singleCollection = TryFindSingleItemCollection(out maskCollection);
+            canUseBitmask = fits && singleCollection &&
+                            (maskCollection == null || maskCollection.SupportsBitmaskIndexing);
             isMaskDirty = false;
         }
 
-        private bool AllItemCollectionsAllowBitmask()
+        // True when all items belong to one collection (result is null for an empty picker);
+        // false when items span multiple collections or an item has no collection.
+        private bool TryFindSingleItemCollection(out ScriptableObjectCollection collection)
         {
-            for (int i = 0; i < Items.Count; i++)
+            collection = null;
+            List<TItemType> items = Items;
+            for (int i = 0; i < items.Count; i++)
             {
-                if (!Items[i].Collection.SupportsBitmaskIndexing)
+                ScriptableObjectCollection itemCollection = items[i].Collection;
+                if (itemCollection == null)
+                    return false;
+
+                if (collection == null)
+                    collection = itemCollection;
+                else if (itemCollection != collection)
                     return false;
             }
+
             return true;
         }
 
