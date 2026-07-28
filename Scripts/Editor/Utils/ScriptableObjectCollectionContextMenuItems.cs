@@ -46,6 +46,25 @@ namespace BrunoMikoski.ScriptableObjectCollections
             CodeGenerationUtility.GenerateIndirectAccessForCollectionItemType(collection.GetItemType());
         }
         
+        [MenuItem("CONTEXT/ScriptableObjectCollection/Sort Items By Name", false, 99999)]
+        private static void SortItemsByName(MenuCommand command)
+        {
+            ScriptableObjectCollection collection = (ScriptableObjectCollection)command.context;
+
+            Undo.RecordObject(collection, "Sort Items By Name");
+            collection.OrderByName();
+            AssetDatabase.SaveAssetIfDirty(collection);
+
+            ActiveEditorTracker.sharedTracker.ForceRebuild();
+        }
+
+        [MenuItem("CONTEXT/ScriptableObjectCollection/Sort Items By Name", true)]
+        private static bool SortItemsByNameValidator(MenuCommand command)
+        {
+            ScriptableObjectCollection collection = (ScriptableObjectCollection)command.context;
+            return !collection.ShouldProtectItemOrder && collection.Count > 1;
+        }
+
         [MenuItem("CONTEXT/ScriptableObjectCollection/Reset Settings", false, 1000)]
         private static void ResetSettings(MenuCommand command)
         {
