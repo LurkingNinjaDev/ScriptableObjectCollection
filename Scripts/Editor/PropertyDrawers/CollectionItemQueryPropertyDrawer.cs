@@ -330,7 +330,7 @@ namespace BrunoMikoski.ScriptableObjectCollections.Picker
                 int hash = 17;
                 hash = hash * 31 + property.propertyPath.GetHashCode();
                 hash = hash * 31 + (property.serializedObject.targetObject != null
-                    ? property.serializedObject.targetObject.GetInstanceID()
+                    ? property.serializedObject.targetObject.GetEntityId().GetHashCode()
                     : 0);
 
                 int arraySize = queryProp.arraySize;

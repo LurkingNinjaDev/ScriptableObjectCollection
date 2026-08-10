@@ -52,6 +52,11 @@ namespace BrunoMikoski.ScriptableObjectCollections.Picker
             return Matches(targetItems, out _);
         }
 
+        public bool Matches(IReadOnlyList<T> targetItems)
+        {
+            return Matches(targetItems, out _);
+        }
+
         /// <summary>
         /// Fast path for picker targets (e.g. a tag list): when both this query's pickers and
         /// <paramref name="targetPicker"/> are bitmask-compatible on the same collection, matching
@@ -118,7 +123,25 @@ namespace BrunoMikoski.ScriptableObjectCollections.Picker
                     return MatchesViaBitmask(targetMask, out resultMatchCount);
             }
 
-            return MatchesViaGuids(targetItems, out resultMatchCount);
+            FillTargetGuids(targetItems);
+            return MatchesViaGuids(out resultMatchCount);
+        }
+
+        public bool Matches(IReadOnlyList<T> targetItems, out int resultMatchCount)
+        {
+            resultMatchCount = 0;
+            if (query.Length == 0)
+                return true;
+
+            if (TryGetSharedBitmaskCollection(out ScriptableObjectCollection sharedCollection))
+            {
+                ulong targetMask = CollectionItemMask64.From(targetItems, sharedCollection, out bool targetFits);
+                if (targetFits)
+                    return MatchesViaBitmask(targetMask, out resultMatchCount);
+            }
+
+            FillTargetGuids(targetItems);
+            return MatchesViaGuids(out resultMatchCount);
         }
 
         // True when every picker can use the bitmask fast path AND all non-empty pickers agree on
@@ -168,18 +191,35 @@ namespace BrunoMikoski.ScriptableObjectCollections.Picker
             return true;
         }
 
-        private bool MatchesViaGuids(IEnumerable<T> targetItems, out int resultMatchCount)
+        private void FillTargetGuids(IEnumerable<T> targetItems)
         {
             targetGuids.Clear();
-            if (targetItems != null)
-            {
-                foreach (T item in targetItems)
-                {
-                    if (item)
-                        targetGuids.Add(item.GUID);
-                }
-            }
+            if (targetItems == null)
+                return;
 
+            foreach (T item in targetItems)
+            {
+                if (item)
+                    targetGuids.Add(item.GUID);
+            }
+        }
+
+        private void FillTargetGuids(IReadOnlyList<T> targetItems)
+        {
+            targetGuids.Clear();
+            if (targetItems == null)
+                return;
+
+            for (int i = 0; i < targetItems.Count; i++)
+            {
+                T item = targetItems[i];
+                if (item)
+                    targetGuids.Add(item.GUID);
+            }
+        }
+
+        private bool MatchesViaGuids(out int resultMatchCount)
+        {
             resultMatchCount = 0;
             for (int i = 0; i < query.Length; i++)
             {

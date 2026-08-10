@@ -59,6 +59,12 @@ namespace BrunoMikoski.ScriptableObjectCollections
             return From(items, null, out fits);
         }
 
+        public static ulong From<T>(IReadOnlyList<T> items, out bool fits)
+            where T : ScriptableObject, ISOCItem
+        {
+            return From(items, null, out fits);
+        }
+
         // Builds a mask from items' Index values. When expectedCollection is non-null, any item
         // belonging to a different collection sets fits=false and is excluded — bit positions are
         // per-collection, so mixing collections in one mask would let unrelated items collide.
@@ -71,31 +77,50 @@ namespace BrunoMikoski.ScriptableObjectCollections
                 return 0UL;
 
             foreach (T item in items)
-            {
-                if (!item)
-                    continue;
-
-                ScriptableObjectCollectionItem socItem = item as ScriptableObjectCollectionItem;
-                if (socItem == null)
-                    continue;
-
-                if (expectedCollection != null && socItem.Collection != expectedCollection)
-                {
-                    fits = false;
-                    continue;
-                }
-
-                int index = socItem.Index;
-                if (!IsValidIndex(index))
-                {
-                    fits = false;
-                    continue;
-                }
-
-                mask |= Bit(index);
-            }
+                Accumulate(item, expectedCollection, ref mask, ref fits);
 
             return mask;
+        }
+
+        public static ulong From<T>(IReadOnlyList<T> items, ScriptableObjectCollection expectedCollection, out bool fits)
+            where T : ScriptableObject, ISOCItem
+        {
+            fits = true;
+            ulong mask = 0UL;
+            if (items == null)
+                return 0UL;
+
+            for (int i = 0; i < items.Count; i++)
+                Accumulate(items[i], expectedCollection, ref mask, ref fits);
+
+            return mask;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static void Accumulate<T>(T item, ScriptableObjectCollection expectedCollection, ref ulong mask, ref bool fits)
+            where T : ScriptableObject, ISOCItem
+        {
+            if (!item)
+                return;
+
+            ScriptableObjectCollectionItem socItem = item as ScriptableObjectCollectionItem;
+            if (socItem == null)
+                return;
+
+            if (expectedCollection != null && socItem.Collection != expectedCollection)
+            {
+                fits = false;
+                return;
+            }
+
+            int index = socItem.Index;
+            if (!IsValidIndex(index))
+            {
+                fits = false;
+                return;
+            }
+
+            mask |= Bit(index);
         }
     }
 
